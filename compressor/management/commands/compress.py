@@ -2,9 +2,9 @@
 import io
 import os
 import sys
-from types import MethodType
 from fnmatch import fnmatch
 from optparse import make_option
+from copy import copy
 
 from django.core.management.base import NoArgsCommand, CommandError
 from django.template import (Context, Template,
@@ -12,9 +12,10 @@ from django.template import (Context, Template,
 from django.utils import six
 from django.utils.datastructures import SortedDict
 from django.utils.importlib import import_module
+from django.template.base import Node, VariableNode, TextNode, NodeList
+from django.template.defaulttags import IfNode
 from django.template.loader import get_template  # noqa Leave this in to preload template locations
-from django.template.loader_tags import (ExtendsNode, BlockNode,
-                                         BLOCK_CONTEXT_KEY)
+from django.template.loader_tags import (ExtendsNode, BlockNode, BlockContext)
 
 try:
     from django.template.loaders.cached import Loader as CachedLoader
@@ -37,75 +38,77 @@ else:
         from StringIO import StringIO
 
 
-def patched_render(self, context):
-    # 'Fake' _render method that just returns the context instead of
-    # rendering. It also checks whether the first node is an extend node or
-    # not, to be able to handle complex inheritance chain.
-    self._render_firstnode = MethodType(patched_render_firstnode, self)
-    self._render_firstnode(context)
+def handle_extendsnode(extendsnode, block_context=None):
+    """Create a copy of Node tree of a derived template replacing
+    all blocks tags with the nodes of appropriate blocks.
+    Also handles {{ block.super }} tags.
+    """
+    if block_context is None:
+        block_context = BlockContext()
+    blocks = dict((n.name, n) for n in
+                  extendsnode.nodelist.get_nodes_by_type(BlockNode))
+    block_context.add_blocks(blocks)
 
-    # Cleanup, uninstall our _render monkeypatch now that it has been called
-    self._render = self._old_render
-    return context
+    context = Context(settings.COMPRESS_OFFLINE_CONTEXT)
+    compiled_parent = extendsnode.get_parent(context)
+    parent_nodelist = compiled_parent.nodelist
+    # If the parent template has an ExtendsNode it is not the root.
+    for node in parent_nodelist:
+        # The ExtendsNode has to be the first non-text node.
+        if not isinstance(node, TextNode):
+            if isinstance(node, ExtendsNode):
+                return handle_extendsnode(node, block_context)
+            break
+    # Add blocks of the root template to block context.
+    blocks = dict((n.name, n) for n in
+                  parent_nodelist.get_nodes_by_type(BlockNode))
+    block_context.add_blocks(blocks)
 
-
-def patched_render_firstnode(self, context):
-    # If this template has a ExtendsNode, we want to find out what
-    # should be put in render_context to make the {% block ... %}
-    # tags work.
-    #
-    # We can't fully render the base template(s) (we don't have the
-    # full context vars - only what's necessary to render the compress
-    # nodes!), therefore we hack the ExtendsNode we found, patching
-    # its get_parent method so that rendering the ExtendsNode only
-    # gives us the blocks content without doing any actual rendering.
-    extra_context = {}
-    try:
-        firstnode = self.nodelist[0]
-    except IndexError:
-        firstnode = None
-    if isinstance(firstnode, ExtendsNode):
-        firstnode._log = self._log
-        firstnode._log_verbosity = self._log_verbosity
-        firstnode._old_get_parent = firstnode.get_parent
-        firstnode.get_parent = MethodType(patched_get_parent, firstnode)
-        try:
-            extra_context = firstnode.render(context)
-            context.render_context = extra_context.render_context
-            # We aren't rendering {% block %} tags, but we want
-            # {{ block.super }} inside {% compress %} inside {% block %}s to
-            # work. Therefore, we need to pop() the last block context for
-            # each block name, to emulate what would have been done if the
-            # {% block %} had been fully rendered.
-            for blockname in firstnode.blocks.keys():
-                context.render_context[BLOCK_CONTEXT_KEY].pop(blockname)
-        except (IOError, TemplateSyntaxError, TemplateDoesNotExist):
-            # That first node we are trying to render might cause more errors
-            # that we didn't catch when simply creating a Template instance
-            # above, so we need to catch that (and ignore it, just like above)
-            # as well.
-            if self._log_verbosity > 0:
-                self._log.write("Caught error when rendering extend node from "
-                                "template %s\n" % getattr(self, 'name', self))
-            return None
-        finally:
-            # Cleanup, uninstall our get_parent monkeypatch now that it has been called
-            firstnode.get_parent = firstnode._old_get_parent
-    return extra_context
+    block_stack = []
+    new_nodelist = remove_block_nodes(parent_nodelist, block_stack, block_context)
+    return new_nodelist
 
 
-def patched_get_parent(self, context):
-    # Patch template returned by extendsnode's get_parent to make sure their
-    # _render method is just returning the context instead of actually
-    # rendering stuff.
-    # In addition, this follows the inheritance chain by looking if the first
-    # node of the template is an extend node itself.
-    compiled_template = self._old_get_parent(context)
-    compiled_template._log = self._log
-    compiled_template._log_verbosity = self._log_verbosity
-    compiled_template._old_render = compiled_template._render
-    compiled_template._render = MethodType(patched_render, compiled_template)
-    return compiled_template
+def remove_block_nodes(nodelist, block_stack, block_context):
+    new_nodelist = NodeList()
+    for node in nodelist:
+        if isinstance(node, VariableNode):
+            var_name = node.filter_expression.token.strip()
+            if var_name == 'block.super':
+                if not block_stack:
+                    continue
+                node = block_context.get_block(block_stack[-1].name)
+        if isinstance(node, BlockNode):
+            expanded_block = expand_blocknode(node, block_stack, block_context)
+            new_nodelist.extend(expanded_block)
+        else:
+            # IfNode has nodelist as a @property so we can not modify it
+            if isinstance(node, IfNode):
+                node = copy(node)
+                for i, (condition, sub_nodelist) in enumerate(node.conditions_nodelists):
+                    sub_nodelist = remove_block_nodes(sub_nodelist, block_stack, block_context)
+                    node.conditions_nodelists[i] = (condition, sub_nodelist)
+            else:
+                for attr in node.child_nodelists:
+                    sub_nodelist = getattr(node, attr, None)
+                    if sub_nodelist:
+                        sub_nodelist = remove_block_nodes(sub_nodelist, block_stack, block_context)
+                        node = copy(node)
+                        setattr(node, attr, sub_nodelist)
+            new_nodelist.append(node)
+    return new_nodelist
+
+
+def expand_blocknode(node, block_stack, block_context):
+    popped_block = block = block_context.pop(node.name)
+    if block is None:
+        block = node
+    block_stack.append(block)
+    expanded_nodelist = remove_block_nodes(block.nodelist, block_stack, block_context)
+    block_stack.pop()
+    if popped_block is not None:
+        block_context.push(node.name, popped_block)
+    return expanded_nodelist
 
 
 class Command(NoArgsCommand):
@@ -237,7 +240,13 @@ class Command(NoArgsCommand):
                 if verbosity > 0:
                     log.write("UnicodeDecodeError while trying to read "
                               "template %s\n" % template_name)
-            nodes = list(self.walk_nodes(template))
+            try:
+                nodes = list(self.walk_nodes(template))
+            except (TemplateDoesNotExist, TemplateSyntaxError) as e:
+                # Could be an error in some base template
+                if verbosity > 0:
+                    log.write("Error parsing template %s: %s\n" % (template_name, e))
+                continue
             if nodes:
                 template.template_name = template_name
                 compressor_nodes.setdefault(template, []).extend(nodes)
@@ -259,21 +268,8 @@ class Command(NoArgsCommand):
         offline_manifest = SortedDict()
         for template, nodes in compressor_nodes.items():
             context = Context(settings.COMPRESS_OFFLINE_CONTEXT)
-            template._log = log
-            template._log_verbosity = verbosity
-            template._render_firstnode = MethodType(patched_render_firstnode, template)
-            extra_context = template._render_firstnode(context)
-            if extra_context is None:
-                # Something is wrong - ignore this template
-                continue
             for node in nodes:
                 context.push()
-                if extra_context and node._block_name:
-                    # Give a block context to the node if it was found inside
-                    # a {% block %}.
-                    context['block'] = context.render_context[BLOCK_CONTEXT_KEY].get_block(node._block_name)
-                    if context['block']:
-                        context['block'].context = context
                 key = get_offline_hexdigest(node.nodelist.render(context))
                 try:
                     result = node.render(context, forced=True)
@@ -292,20 +288,23 @@ class Command(NoArgsCommand):
         return count, results
 
     def get_nodelist(self, node):
+        if isinstance(node, ExtendsNode):
+            return handle_extendsnode(node)
         # Check if node is an ```if``` switch with true and false branches
-        if hasattr(node, 'nodelist_true') and hasattr(node, 'nodelist_false'):
-            return node.nodelist_true + node.nodelist_false
-        return getattr(node, "nodelist", [])
+        nodelist = []
+        if isinstance(node, Node):
+            for attr in node.child_nodelists:
+                nodelist += getattr(node, attr, [])
+        else:
+            nodelist = getattr(node, 'nodelist', [])
+        return nodelist
 
-    def walk_nodes(self, node, block_name=None):
+    def walk_nodes(self, node):
         for node in self.get_nodelist(node):
-            if isinstance(node, BlockNode):
-                block_name = node.name
             if isinstance(node, CompressorNode) and node.is_offline_compression_enabled(forced=True):
-                node._block_name = block_name
                 yield node
             else:
-                for node in self.walk_nodes(node, block_name=block_name):
+                for node in self.walk_nodes(node):
                     yield node
 
     def handle_extensions(self, extensions=('html',)):
