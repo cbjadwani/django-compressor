@@ -261,3 +261,44 @@ class OfflineGenerationInlineNonAsciiTestCase(OfflineTestCaseMixin, TestCase):
         count, result = CompressCommand().compress(log=self.log, verbosity=self.verbosity)
         rendered_template = self.template.render(Context(settings.COMPRESS_OFFLINE_CONTEXT))
         self.assertEqual(rendered_template, "".join(result) + "\n")
+
+
+class OfflineGenerationBlockSuperBaseCompressed(OfflineTestCaseMixin, TestCase):
+    template_names = ["base.html", "base2.html", "test_compressor_offline.html"]
+    templates_dir = 'test_block_super_base_compressed'
+    expected_hash = ['028c3fc42232', '2e9d3f5545a6', 'f8891c416981']
+
+    def setUp(self):
+        self._old_compress = settings.COMPRESS_ENABLED
+        self._old_compress_offline = settings.COMPRESS_OFFLINE
+        self._old_template_dirs = settings.TEMPLATE_DIRS
+        self._old_offline_context = settings.COMPRESS_OFFLINE_CONTEXT
+        self.log = StringIO()
+
+        # Reset template dirs, because it enables us to force compress to
+        # consider only a specific directory (helps us make true,
+        # independant unit tests).
+        settings.TEMPLATE_DIRS = (
+            os.path.join(settings.TEST_DIR, 'test_templates', self.templates_dir),
+        )
+        # Enable offline compress
+        settings.COMPRESS_ENABLED = True
+        settings.COMPRESS_OFFLINE = True
+
+        self.template_paths = []
+        self.templates = []
+        for template_name in self.template_names:
+            template_path = os.path.join(settings.TEMPLATE_DIRS[0], template_name)
+            self.template_paths.append(template_path)
+            with io.open(template_path, encoding=settings.FILE_CHARSET) as file:
+                template = Template(file.read())
+            self.templates.append(template)
+
+    def test_offline(self):
+        count, result = CompressCommand().compress(log=self.log, verbosity=self.verbosity)
+        self.assertEqual(len(self.expected_hash), count)
+        for expected_hash, template in zip(self.expected_hash, self.templates):
+            expected_output = '<script type="text/javascript" src="/static/CACHE/js/%s.js"></script>' % (expected_hash, )
+            self.assertIn(expected_output, result)
+            rendered_template = template.render(Context(settings.COMPRESS_OFFLINE_CONTEXT))
+            self.assertEqual(rendered_template, expected_output + '\n')
