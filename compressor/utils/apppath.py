@@ -4,6 +4,7 @@ from django.conf import settings
 from django.contrib.staticfiles.finders import AppDirectoriesFinder
 import importlib
 
+
 def __get_app_paths():
     app_paths = set()
     for app in settings.INSTALLED_APPS:
@@ -13,6 +14,7 @@ def __get_app_paths():
     return app_paths
 
 __app_paths = __get_app_paths()
+
 
 def search_in_apps(file):
     try:
@@ -25,6 +27,7 @@ def search_in_apps(file):
     except:
         return None
 
+
 def search_in_dirs(file):
     for dir in settings.STATICFILES_DIRS:
         path = os.path.join(dir, file)
@@ -32,11 +35,13 @@ def search_in_dirs(file):
             return os.path.dirname(dir)
     return None
 
+
 def get_filename(dir, full_path):
     file = full_path.replace(dir, '')
     if file[:1] == '/':
         file = file[1:]
     return file
+
 
 def get_app_path_for_filepath(file_path):
     if file_path.startswith(settings.STATIC_ROOT):
@@ -62,5 +67,3 @@ def get_app_path_for_filepath(file_path):
             if file_path.startswith(path):
                 return path
     return settings.STATIC_ROOT
-
-
