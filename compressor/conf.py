@@ -1,3 +1,4 @@
+from __future__ import unicode_literals
 import os
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -11,7 +12,7 @@ class CompressorConf(AppConf):
     # Allows changing verbosity from the settings.
     VERBOSE = False
     # GET variable that disables compressor e.g. "nocompress"
-    DEBUG_TOGGLE = 'None'
+    DEBUG_TOGGLE = None
     # the backend to use when parsing the JavaScript or Stylesheet files
     PARSER = 'compressor.parser.AutoSelectParser'
     OUTPUT_DIR = 'CACHE'
@@ -41,6 +42,9 @@ class CompressorConf(AppConf):
     YUI_BINARY = 'java -jar yuicompressor.jar'
     YUI_CSS_ARGUMENTS = ''
     YUI_JS_ARGUMENTS = ''
+    YUGLIFY_BINARY = 'yuglify'
+    YUGLIFY_CSS_ARGUMENTS = '--terminal'
+    YUGLIFY_JS_ARGUMENTS = '--terminal'
     DATA_URI_MAX_SIZE = 1024
 
     # the cache backend to use
@@ -73,7 +77,8 @@ class CompressorConf(AppConf):
         if value is None:
             value = settings.STATIC_ROOT
         if value is None:
-            raise ImproperlyConfigured("COMPRESS_ROOT setting must be set")
+            raise ImproperlyConfigured('COMPRESS_ROOT defaults to ' +
+                                       'STATIC_ROOT, please define either')
         return os.path.normcase(os.path.abspath(value))
 
     def configure_url(self, value):
