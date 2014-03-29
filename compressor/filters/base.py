@@ -12,6 +12,7 @@ from django.utils import six
 from compressor.conf import settings
 from compressor.exceptions import FilterError
 from compressor.utils import get_mod_func
+from compressor.utils.apppath import get_app_path_for_filepath
 
 
 logger = logging.getLogger("compressor.filters")
@@ -100,12 +101,15 @@ class CompilerFilter(FilterBase):
 
     def __init__(self, content, command=None, *args, **kwargs):
         super(CompilerFilter, self).__init__(content, *args, **kwargs)
-        self.cwd = None
 
         if command:
             self.command = command
         if self.command is None:
             raise FilterError("Required attribute 'command' not given")
+        if self.filename is not None:
+            self.cwd = get_app_path_for_filepath(self.filename)
+        else:
+            self.cwd = None
 
         if isinstance(self.options, dict):
             # turn dict into a tuple
